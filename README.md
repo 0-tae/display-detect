@@ -24,7 +24,7 @@ pip install Pillow opencv-python numpy requests
 
 2. 디스코드 설정 파일 생성
 
-프로젝트 루트에 `discord.json` 파일을 만들고 아래처럼 입력합니다.
+`discord.json` 파일에 디스코드 서버 설정을 입력합니다.
 
 ```json
 {
