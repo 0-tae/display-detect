@@ -10,12 +10,14 @@ import requests
 from PIL import ImageGrab
 
 
-CAPTURED_DIR = Path("captured")
-SEARCH_DIR = Path("search")
-CONFIG_FILE = Path("discord.json")
+BASE_PATH = Path(__file__).resolve().parent
+CAPTURED_DIR = BASE_PATH / "captured"
+SEARCH_DIR = BASE_PATH / "search"
+CONFIG_FILE = BASE_PATH / "discord.json"
 MATCH_THRESHOLD = 0.8
 PRETEST_CAPTURE_FILE = CAPTURED_DIR / "captured_test.png"
 PRETEST_TEMPLATE_FILE = SEARCH_DIR / "search_test.png"
+MIDNIGHT_WAITING_EMOJI = "<:waiting:1487088573730787428>"
 
 
 def ensure_directories() -> None:
@@ -23,10 +25,10 @@ def ensure_directories() -> None:
 	SEARCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_discord_config(config_path: Path) -> tuple[str, str]:
+def load_discord_config(config_path: Path) -> tuple[str, str, str]:
 	if not config_path.exists():
 		print(f"[Error] Missing config file: {config_path}")
-		print("Create discord.json in the same folder as remind.py.")
+		print(f"Create discord.json in: {BASE_PATH}")
 		sys.exit(1)
 
 	try:
@@ -38,11 +40,12 @@ def load_discord_config(config_path: Path) -> tuple[str, str]:
 
 	bot_token = str(data.get("bot_token", "")).strip()
 	channel_id = str(data.get("channel_id", "")).strip()
+	mention_text = str(data.get("mention_text", "")).strip()
 	if not bot_token or not channel_id:
 		print("[Error] discord.json must contain non-empty 'bot_token' and 'channel_id'.")
 		sys.exit(1)
 
-	return bot_token, channel_id
+	return bot_token, channel_id, mention_text
 
 
 class RegionSelector:
@@ -144,6 +147,25 @@ def send_to_discord(bot_token: str, channel_id: str, image_path: Path, text_mess
 	return False
 
 
+def send_message_to_discord(bot_token: str, channel_id: str, text_message: str) -> bool:
+	url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+	headers = {"Authorization": f"Bot {bot_token}"}
+	payload = {"content": text_message}
+
+	try:
+		response = requests.post(url, headers=headers, json=payload, timeout=20)
+	except requests.RequestException as exc:
+		print(f"[Discord] Message request error: {exc}")
+		return False
+
+	if response.status_code == 200:
+		print(f"[Discord] Message sent: {text_message}")
+		return True
+
+	print(f"[Discord] Message send failed ({response.status_code}): {response.text}")
+	return False
+
+
 def list_search_images(search_dir: Path) -> list[Path]:
 	valid_ext = {".png", ".jpg", ".jpeg"}
 	return [p for p in search_dir.iterdir() if p.is_file() and p.suffix.lower() in valid_ext]
@@ -207,43 +229,68 @@ def capture_and_process(
 	bbox_coords: tuple[int, int, int, int],
 	bot_token: str,
 	channel_id: str,
+	mention_text: str = "",
 ) -> None:
-	timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-	save_path = CAPTURED_DIR / f"capture_{timestamp}.png"
+	timestamp = datetime.datetime.now().strftime("%y-%m-%d_%H-%M")
+	save_path = CAPTURED_DIR / f"captured_{timestamp}.png"
 
 	image = ImageGrab.grab(bbox=bbox_coords)
 	image.save(save_path)
 	print(f"[Capture] Saved: {save_path}")
 
-	send_to_discord(bot_token, channel_id, save_path, "Capture from selected screen region.")
+	send_to_discord(bot_token, channel_id, save_path, "Selected screen region captured.")
 
 	if find_target_in_image(save_path, SEARCH_DIR):
-		send_to_discord(bot_token, channel_id, save_path, "Alert: Target detected in captured region.")
+		alert_msg = "Detected target found in captured region."
+		if mention_text:
+			alert_msg = f"{mention_text} {alert_msg}"
+		for attempt in range(10):
+			send_to_discord(bot_token, channel_id, save_path, alert_msg)
 
 
-def run_scheduler(capture_bbox: tuple[int, int, int, int], bot_token: str, channel_id: str) -> None:
+def run_scheduler(capture_bbox: tuple[int, int, int, int], bot_token: str, channel_id: str, mention_text: str = "") -> None:
 	print("Running immediate test capture...")
-	capture_and_process(capture_bbox, bot_token, channel_id)
+	capture_and_process(capture_bbox, bot_token, channel_id, mention_text)
 
-	print("Scheduler started: will run at every even hour exactly at HH:00.")
-	captured_this_hour = False
+	startup_msg = "Scheduler started!"
+	if mention_text:
+		startup_msg = f"{mention_text} {startup_msg}"
+	send_message_to_discord(bot_token, channel_id, startup_msg)
+
+	print("Scheduler started.")
+	captured_recently = False
+	captured_time = None
+	prev_captured_hour = -1
+	last_midnight_emoji_date: datetime.date | None = None
 
 	while True:
+		
 		now = datetime.datetime.now()
-		if now.hour % 2 == 0 and now.minute == 0:
-			if not captured_this_hour:
-				capture_and_process(capture_bbox, bot_token, channel_id)
-				captured_this_hour = True
-		else:
-			captured_this_hour = False
+		
+		# Reset captured_recently after 2 hours to allow new captures
+		if captured_recently and (now.hour - captured_time.hour >= 2 and prev_captured_hour != now.hour):
+			captured_recently = False
+			prev_captured_hour = now.hour
 
-		time.sleep(1)
+		if now.hour >= 0 and now.minute >= 0 and last_midnight_emoji_date != now.date():
+			send_message_to_discord(bot_token, channel_id, MIDNIGHT_WAITING_EMOJI)
+			last_midnight_emoji_date = now.date()
+
+		if now.hour % 2 == 0 and now.minute >= 1:
+			if not captured_recently:
+				capture_and_process(capture_bbox, bot_token, channel_id, mention_text)
+				captured_recently = True
+				captured_time = datetime.datetime.now()
+
+		time.sleep(300)  # Sleep for 5 minutes
 
 
 def main() -> None:
 	ensure_directories()
 	run_initial_detection_test()
-	bot_token, channel_id = load_discord_config(CONFIG_FILE)
+	bot_token, channel_id, mention_text = load_discord_config(CONFIG_FILE)
+
+	input("Press Enter to start the scheduler...")
 
 	print("Opening region selector...")
 	selector = RegionSelector()
@@ -255,7 +302,7 @@ def main() -> None:
 
 	print(f"Selected coordinates: {coords}")
 	try:
-		run_scheduler(coords, bot_token, channel_id)
+		run_scheduler(coords, bot_token, channel_id, mention_text)
 	except KeyboardInterrupt:
 		print("\nStopped by user.")
 
