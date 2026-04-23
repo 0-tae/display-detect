@@ -1,4 +1,6 @@
 {
-"bot_token": "",
-"channel_id": ""
+  "bot_token": "",
+  "channel_id_time_shop": "",
+  "channel_id_drop_the_item": "",
+  "mention_text": ""
 }
