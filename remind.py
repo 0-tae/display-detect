@@ -25,7 +25,7 @@ def ensure_directories() -> None:
 	SEARCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_discord_config(config_path: Path) -> tuple[str, str, str]:
+def load_discord_config(config_path: Path) -> tuple[str, str, str, str]:
 	if not config_path.exists():
 		print(f"[Error] Missing config file: {config_path}")
 		print(f"Create discord.json in: {BASE_PATH}")
@@ -39,13 +39,21 @@ def load_discord_config(config_path: Path) -> tuple[str, str, str]:
 		sys.exit(1)
 
 	bot_token = str(data.get("bot_token", "")).strip()
-	channel_id = str(data.get("channel_id", "")).strip()
+	channel_id_time_shop = str(data.get("channel_id_time_shop", "")).strip()
+	channel_id_drop_the_item = str(data.get("channel_id_drop_the_item", "")).strip()
 	mention_text = str(data.get("mention_text", "")).strip()
-	if not bot_token or not channel_id:
-		print("[Error] discord.json must contain non-empty 'bot_token' and 'channel_id'.")
+
+	if not bot_token:
+		print("[Error] discord.json must contain non-empty 'bot_token'.")
+		sys.exit(1)
+	if not channel_id_time_shop:
+		print("[Error] discord.json must contain non-empty 'channel_id_time_shop'.")
+		sys.exit(1)
+	if not channel_id_drop_the_item:
+		print("[Error] discord.json must contain non-empty 'channel_id_drop_the_item'.")
 		sys.exit(1)
 
-	return bot_token, channel_id, mention_text
+	return bot_token, channel_id_time_shop, channel_id_drop_the_item, mention_text
 
 
 class RegionSelector:
@@ -268,7 +276,7 @@ def run_scheduler(capture_bbox: tuple[int, int, int, int], bot_token: str, chann
 		now = datetime.datetime.now()
 		
 		# Reset captured_recently after 2 hours to allow new captures
-		if captured_recently and (now.hour - captured_time.hour >= 2 and prev_captured_hour != now.hour):
+		if captured_recently and (abs(now.hour - captured_time.hour) >= 2 and prev_captured_hour != now.hour):
 			captured_recently = False
 			prev_captured_hour = now.hour
 
@@ -285,10 +293,62 @@ def run_scheduler(capture_bbox: tuple[int, int, int, int], bot_token: str, chann
 		time.sleep(300)  # Sleep for 5 minutes
 
 
+def select_mode() -> int:
+	print("=" * 40)
+	print("모드를 선택하세요:")
+	print("  1. 시간의 상점 모드 (짝수 정각마다 캡처)")
+	print("  2. 드랍더템 모드 (30분 간격 캡처)")
+	print("=" * 40)
+	while True:
+		raw = input("번호 입력 (1 또는 2): ").strip()
+		if raw in ("1", "2"):
+			return int(raw)
+		print("[Error] 1 또는 2를 입력하세요.")
+
+
+def run_drop_the_item_scheduler(
+	capture_bbox: tuple[int, int, int, int],
+	bot_token: str,
+	channel_id: str,
+	mention_text: str = "",
+) -> None:
+	while True:
+		raw = input("남은 시간을 입력하세요 (분 단위, 정수): ").strip()
+		if raw.isdigit():
+			remaining_minutes = int(raw)
+			break
+		print("[Error] 양의 정수를 입력하세요.")
+
+	initial_sleep = (remaining_minutes + 1) * 60
+	print(f"[DropTheItem] {remaining_minutes + 1}분 대기 후 시작합니다...")
+	time.sleep(initial_sleep)
+
+	print("Running immediate capture before loop...")
+	capture_and_process(capture_bbox, bot_token, channel_id, mention_text)
+
+	startup_msg = "[드랍더템] 스케줄러 시작!"
+	if mention_text:
+		startup_msg = f"{mention_text} {startup_msg}"
+	send_message_to_discord(bot_token, channel_id, startup_msg)
+
+	print("[DropTheItem] 스케줄러 시작 (30분 간격).")
+	elapsed_minutes = 0
+
+	while True:
+		time.sleep(60)
+		elapsed_minutes += 1
+
+		if elapsed_minutes >= 30:
+			capture_and_process(capture_bbox, bot_token, channel_id, mention_text)
+			elapsed_minutes = 0
+
+
 def main() -> None:
 	ensure_directories()
 	run_initial_detection_test()
-	bot_token, channel_id, mention_text = load_discord_config(CONFIG_FILE)
+	bot_token, channel_id_time_shop, channel_id_drop_the_item, mention_text = load_discord_config(CONFIG_FILE)
+
+	mode = select_mode()
 
 	input("Press Enter to start the scheduler...")
 
@@ -302,7 +362,12 @@ def main() -> None:
 
 	print(f"Selected coordinates: {coords}")
 	try:
-		run_scheduler(coords, bot_token, channel_id, mention_text)
+		if mode == 1:
+			print("[Mode] 시간의 상점 모드")
+			run_scheduler(coords, bot_token, channel_id_time_shop, mention_text)
+		else:
+			print("[Mode] 드랍더템 모드")
+			run_drop_the_item_scheduler(coords, bot_token, channel_id_drop_the_item, mention_text)
 	except KeyboardInterrupt:
 		print("\nStopped by user.")
 
